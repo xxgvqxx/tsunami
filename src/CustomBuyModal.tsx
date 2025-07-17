@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckCircle, ChevronRight, DollarSign, X, Info, Search, Clock } from 'lucide-react';
+import { CheckCircle, ChevronRight, DollarSign, X, Info, Search, Clock, Settings } from 'lucide-react';
 import { getWallets } from './Utils';
 import { useToast } from "./Notifications";
 import { loadConfigFromCookies } from './Utils';
+import { DelaysCurveComponent } from './DelaysCurveComponent';
 import * as web3 from '@solana/web3.js';
 import bs58 from 'bs58';
 
@@ -42,6 +43,8 @@ export const CustomBuyModal: React.FC<CustomBuyModalProps> = ({
   const [selectedWallets, setSelectedWallets] = useState<string[]>([]);
   const [walletAmounts, setWalletAmounts] = useState<Record<string, string>>({}); // Individual amounts per wallet
   const [transactionDelay, setTransactionDelay] = useState<string>('1'); // Delay in seconds between transactions
+  const [useCurveDelay, setUseCurveDelay] = useState(false); // Toggle between fixed and curve delay
+  const [walletDelays, setWalletDelays] = useState<number[]>([]); // Per-wallet delays from curve
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isConfirmed, setIsConfirmed] = useState(false);
   const [tokenInfo, setTokenInfo] = useState<{ symbol: string } | null>(null);
@@ -169,6 +172,8 @@ export const CustomBuyModal: React.FC<CustomBuyModalProps> = ({
     setSelectedWallets([]);
     setWalletAmounts({});
     setTransactionDelay('1');
+    setUseCurveDelay(false);
+    setWalletDelays([]);
     setSelectedProtocol('auto');
     setIsConfirmed(false);
     setCurrentStep(0);
@@ -179,6 +184,11 @@ export const CustomBuyModal: React.FC<CustomBuyModalProps> = ({
     setBalanceFilter('all');
     setCurrentTransactionIndex(0);
     setTransactionResults([]);
+  };
+
+  // Handle delays from curve component
+  const handleDelaysChange = (delays: number[]) => {
+    setWalletDelays(delays);
   };
 
   // Helper to get wallet address from private key
@@ -307,10 +317,18 @@ export const CustomBuyModal: React.FC<CustomBuyModalProps> = ({
       }
 
       // Check if delay is valid
-      const delay = parseFloat(transactionDelay);
-      if (isNaN(delay) || delay < 0) {
-        showToast('Please enter a valid delay (0 or more seconds)', 'error');
-        return;
+      if (!useCurveDelay) {
+        const delay = parseFloat(transactionDelay);
+        if (isNaN(delay) || delay < 0) {
+          showToast('Please enter a valid delay (0 or more seconds)', 'error');
+          return;
+        }
+      } else {
+        // For curve mode, ensure we have delays for all wallets
+        if (walletDelays.length !== selectedWallets.length) {
+          showToast('Please configure delay curve for all selected wallets', 'error');
+          return;
+        }
       }
     }
     
@@ -329,12 +347,13 @@ export const CustomBuyModal: React.FC<CustomBuyModalProps> = ({
     setCurrentTransactionIndex(0);
     setTransactionResults([]);
     
-    const delay = parseFloat(transactionDelay) * 1000; // Convert to milliseconds
+    const fixedDelay = parseFloat(transactionDelay) * 1000; // Convert to milliseconds
     let successCount = 0;
     let failCount = 0;
     
     const protocolLabel = protocolOptions.find(p => p.value === selectedProtocol)?.label || selectedProtocol;
-    showToast(`🚀 Starting CUSTOM BUY with ${protocolLabel}`, 'success');
+    const delayType = useCurveDelay ? 'curve delays' : `${transactionDelay}s fixed delay`;
+    showToast(`🚀 Starting CUSTOM BUY with ${protocolLabel} using ${delayType}`, 'success');
     
     try {
       for (let i = 0; i < selectedWallets.length; i++) {
@@ -378,8 +397,20 @@ export const CustomBuyModal: React.FC<CustomBuyModalProps> = ({
         }
         
         // Add delay between transactions (except after the last one)
-        if (i < selectedWallets.length - 1 && delay > 0) {
-          await sleep(delay);
+        if (i < selectedWallets.length - 1) {
+          let delayToUse;
+          
+          if (useCurveDelay && walletDelays.length > i) {
+            // Use curve-based delay for this wallet
+            delayToUse = walletDelays[i] * 1000; // Convert to milliseconds
+          } else {
+            // Use fixed delay
+            delayToUse = fixedDelay;
+          }
+          
+          if (delayToUse > 0) {
+            await sleep(delayToUse);
+          }
         }
       }
       
@@ -886,39 +917,106 @@ export const CustomBuyModal: React.FC<CustomBuyModalProps> = ({
                   </div>
                 </div>
                 
-                {/* Transaction delay */}
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Clock size={16} className="text-[#02b36d]" />
-                    <label className="text-sm text-[#7ddfbd] font-mono tracking-wider">
-                      DELAY (SEC)
-                    </label>
-                  </div>
-                  <div className="flex items-center">
-                    <div className="relative">
-                      <input
-                        type="text"
-                        value={transactionDelay}
-                        placeholder="0.45"
-                        className="w-24 px-3 py-1.5 bg-[#050a0e] border border-[#02b36d30] rounded text-sm text-[#e4fbf2] focus:outline-none focus:border-[#02b36d] transition-all modal-input-cyberpunk font-mono text-center"
-                        onChange={(e) => {
-                          const value = e.target.value;
-                          if (value === '' || /^\d*\.?\d*$/.test(value)) {
-                            setTransactionDelay(value);
-                          }
-                        }}
-                      />
+                {/* Transaction delay mode selector */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Clock size={16} className="text-[#02b36d]" />
+                      <label className="text-sm text-[#7ddfbd] font-mono tracking-wider">
+                        DELAY MODE
+                      </label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setUseCurveDelay(false)}
+                        className={`px-3 py-1.5 text-xs rounded font-mono transition-all ${
+                          !useCurveDelay 
+                            ? 'bg-[#02b36d] text-[#050a0e]' 
+                            : 'bg-[#02b36d20] text-[#02b36d] border border-[#02b36d40]'
+                        }`}
+                      >
+                        FIXED
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setUseCurveDelay(true)}
+                        className={`px-3 py-1.5 text-xs rounded font-mono transition-all ${
+                          useCurveDelay 
+                            ? 'bg-[#02b36d] text-[#050a0e]' 
+                            : 'bg-[#02b36d20] text-[#02b36d] border border-[#02b36d40]'
+                        }`}
+                      >
+                        <Settings size={12} className="inline mr-1" />
+                        CURVE
+                      </button>
                     </div>
                   </div>
+                  
+                  {/* Fixed delay input */}
+                  {!useCurveDelay && (
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Clock size={16} className="text-[#02b36d]" />
+                        <label className="text-sm text-[#7ddfbd] font-mono tracking-wider">
+                          DELAY (SEC)
+                        </label>
+                      </div>
+                      <div className="flex items-center">
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={transactionDelay}
+                            placeholder="0.45"
+                            className="w-24 px-3 py-1.5 bg-[#050a0e] border border-[#02b36d30] rounded text-sm text-[#e4fbf2] focus:outline-none focus:border-[#02b36d] transition-all modal-input-cyberpunk font-mono text-center"
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              if (value === '' || /^\d*\.?\d*$/.test(value)) {
+                                setTransactionDelay(value);
+                              }
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  
                 </div>
               </div>
               <div className="text-xs text-[#7ddfbd] mt-2 font-mono relative z-10">
-                {selectedProtocol === 'auto' 
-                  ? 'AUTO-SELECTS BEST DEX • SET TO 0 FOR NO DELAY'
-                  : `USES ${protocolOptions.find(p => p.value === selectedProtocol)?.label.toUpperCase()} • SET TO 0 FOR NO DELAY`
+                {useCurveDelay 
+                  ? 'CURVE MODE: DRAG WALLETS TO DESIGN CUSTOM DELAY PATTERNS'
+                  : selectedProtocol === 'auto' 
+                    ? 'AUTO-SELECTS BEST DEX • SET TO 0 FOR NO DELAY'
+                    : `USES ${protocolOptions.find(p => p.value === selectedProtocol)?.label.toUpperCase()} • SET TO 0 FOR NO DELAY`
                 }
               </div>
             </div>
+            
+            {/* Curve delay component - moved underneath protocol section */}
+            {useCurveDelay && selectedWallets.length > 0 && (
+              <div className="bg-[#091217] rounded-lg p-4 border border-[#02b36d40] relative overflow-hidden">
+                <div className="absolute inset-0 z-0 opacity-5"
+                     style={{
+                       backgroundImage: 'linear-gradient(rgba(2, 179, 109, 0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(2, 179, 109, 0.2) 1px, transparent 1px)',
+                       backgroundSize: '20px 20px',
+                       backgroundPosition: 'center center',
+                     }}>
+                </div>
+                <div className="relative z-10">
+                  <DelaysCurveComponent
+                    wallets={selectedWallets.map(pk => ({
+                      address: getWalletAddressFromKey(pk),
+                      privateKey: pk
+                    }))}
+                    onDelaysChange={handleDelaysChange}
+                    maxDelay={10}
+                    minDelay={0}
+                    className="w-full"
+                  />
+                </div>
+              </div>
+            )}
             
             {/* Individual wallet amounts */}
             <div className="bg-[#091217] rounded-lg p-4 border border-[#02b36d40] relative overflow-hidden">
@@ -959,6 +1057,14 @@ export const CustomBuyModal: React.FC<CustomBuyModalProps> = ({
                             />
                           </div>
                           <span className="text-xs text-[#7ddfbd] ml-2 font-mono">SOL</span>
+                          {useCurveDelay && walletDelays.length > index && (
+                            <div className="ml-3 flex items-center">
+                              <Clock size={12} className="text-[#02b36d] mr-1" />
+                              <span className="text-xs text-[#02b36d] font-mono font-bold">
+                                {walletDelays[index].toFixed(2)}s
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -978,7 +1084,16 @@ export const CustomBuyModal: React.FC<CustomBuyModalProps> = ({
               <div className="flex justify-between">
                 <span className="text-sm font-medium text-[#02b36d] font-mono tracking-wider">ESTIMATED TIME:</span>
                 <span className="text-sm font-medium text-[#02b36d] font-mono tracking-wider">
-                  ~{Math.ceil((selectedWallets.length - 1) * parseFloat(transactionDelay || '0') + selectedWallets.length * 2)} SEC
+                  ~{(() => {
+                    if (useCurveDelay && walletDelays.length > 0) {
+                      // Sum all curve delays plus execution time
+                      const totalCurveDelays = walletDelays.reduce((sum, delay) => sum + delay, 0);
+                      return Math.ceil(totalCurveDelays + selectedWallets.length * 2);
+                    } else {
+                      // Fixed delay calculation
+                      return Math.ceil((selectedWallets.length - 1) * parseFloat(transactionDelay || '0') + selectedWallets.length * 2);
+                    }
+                  })()} SEC
                 </span>
               </div>
             </div>
@@ -1094,8 +1209,10 @@ export const CustomBuyModal: React.FC<CustomBuyModalProps> = ({
                       </span>
                     </div>
                     <div className="flex justify-between py-1.5 border-b border-[#02b36d30]">
-                      <span className="text-sm text-[#7ddfbd] font-mono">TRANSACTION DELAY: </span>
-                      <span className="text-sm text-[#e4fbf2] font-medium font-mono">{transactionDelay}s</span>
+                      <span className="text-sm text-[#7ddfbd] font-mono">DELAY MODE: </span>
+                      <span className="text-sm text-[#e4fbf2] font-medium font-mono">
+                        {useCurveDelay ? 'CUSTOM CURVE' : `${transactionDelay}s FIXED`}
+                      </span>
                     </div>
                     <div className="flex justify-between py-1.5 border-b border-[#02b36d30]">
                       <span className="text-sm text-[#7ddfbd] font-mono">TOTAL WALLETS: </span>
@@ -1133,7 +1250,7 @@ export const CustomBuyModal: React.FC<CustomBuyModalProps> = ({
                     </div>
                     <label htmlFor="confirm" className="text-sm text-[#7ddfbd] leading-relaxed font-mono">
                       I CONFIRM THAT I WANT TO BUY {tokenInfo?.symbol || 'TOKEN'} USING THE SPECIFIED AMOUNTS
-                      ACROSS {selectedWallets.length} WALLETS WITH {transactionDelay}s DELAY BETWEEN TRANSACTIONS
+                      ACROSS {selectedWallets.length} WALLETS WITH {useCurveDelay ? 'CUSTOM CURVE DELAYS' : `${transactionDelay}s FIXED DELAY`} BETWEEN TRANSACTIONS
                       VIA {protocolOptions.find(p => p.value === selectedProtocol)?.label.toUpperCase()} PROTOCOL. 
                       TRANSACTIONS WILL BE PROCESSED SEQUENTIALLY. THIS ACTION CANNOT BE UNDONE.
                     </label>
